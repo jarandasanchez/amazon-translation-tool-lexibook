@@ -92,7 +92,7 @@ def translate_single(
     Translate a single text to the target language with retry logic.
     """
     if not text or str(text).strip() == "" or str(text).strip() == "-" or str(text).strip().lower() == "nan":
-        return "-"
+        return ""  # Return empty string instead of "-"
 
     prompt = get_translation_prompt(target_language)
 
@@ -128,7 +128,8 @@ def translate_content_list(
     target_language: str,
     client: OpenAI,
     model: str = "gpt-4o-mini",
-    progress_callback: Optional[Callable[[int, int], None]] = None
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    existing_content: Optional[dict] = None
 ) -> List[str]:
     """
     Translate a list of content strings.
@@ -139,16 +140,22 @@ def translate_content_list(
         client: OpenAI client instance
         model: Model to use for translation
         progress_callback: Optional callback(current, total) for progress updates
+        existing_content: Optional dict mapping row index to existing content (skip these rows)
 
     Returns:
         List of translated texts
     """
     translations = []
     total = len(content_list)
+    existing = existing_content or {}
 
     for i, text in enumerate(content_list):
-        translated = translate_single(str(text), target_language, client, model)
-        translations.append(translated)
+        # Skip if this row already has content in the target sheet
+        if i in existing and existing[i].strip():
+            translations.append(existing[i])  # Keep existing content
+        else:
+            translated = translate_single(str(text), target_language, client, model)
+            translations.append(translated)
 
         if progress_callback:
             progress_callback(i + 1, total)

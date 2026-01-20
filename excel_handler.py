@@ -5,6 +5,44 @@ import openpyxl
 from copy import copy
 
 
+def get_existing_content(file, sheet_name: str, content_column: str) -> Dict[int, str]:
+    """
+    Read existing content from a target sheet.
+    Returns a dict mapping row index (0-based) to existing content.
+    Only includes rows that have non-empty content.
+    """
+    existing = {}
+    try:
+        wb = openpyxl.load_workbook(file)
+        file.seek(0)
+
+        if sheet_name not in wb.sheetnames:
+            return existing
+
+        ws = wb[sheet_name]
+
+        # Find the content column index
+        content_col_idx = None
+        for col_idx, cell in enumerate(ws[1], start=1):
+            if cell.value == content_column:
+                content_col_idx = col_idx
+                break
+
+        if content_col_idx is None:
+            content_col_idx = 2  # Default to column B
+
+        # Read existing content (starting from row 2, skipping header)
+        for row_idx in range(2, ws.max_row + 1):
+            cell_value = ws.cell(row=row_idx, column=content_col_idx).value
+            if cell_value is not None and str(cell_value).strip() != "":
+                existing[row_idx - 2] = str(cell_value)  # 0-based index
+
+    except Exception:
+        pass
+
+    return existing
+
+
 def get_workbook_info(file) -> Tuple[List[str], Dict[str, List[str]], Dict[str, int]]:
     """
     Get information about an Excel workbook.

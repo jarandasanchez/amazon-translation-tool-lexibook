@@ -10,6 +10,7 @@ from excel_handler import (
     read_source_sheet,
     create_translated_workbook,
     create_multi_file_zip,
+    get_existing_content,
 )
 from translator import (
     translate_content_list,
@@ -137,7 +138,7 @@ st.markdown("""
 
 
 def get_openai_client():
-    """Get OpenAI client from secrets or environment."""
+    """Get OpenAI client from secrets or environment (no user input)."""
     api_key = None
     try:
         api_key = st.secrets.get("OPENAI_API_KEY")
@@ -148,6 +149,18 @@ def get_openai_client():
     if not api_key:
         return None
     return OpenAI(api_key=api_key)
+
+
+def is_api_configured():
+    """Check if the API is configured (without exposing details to user)."""
+    try:
+        if st.secrets.get("OPENAI_API_KEY"):
+            return True
+    except:
+        pass
+    if os.getenv("OPENAI_API_KEY"):
+        return True
+    return False
 
 
 def initialize_session_state():
@@ -176,15 +189,10 @@ def main():
         st.markdown("#### Settings")
 
         client = get_openai_client()
-        if not client:
-            api_key = st.text_input("OpenAI API Key", type="password", label_visibility="collapsed", placeholder="Enter API key...")
-            if api_key:
-                client = OpenAI(api_key=api_key)
-
         if client:
-            st.success("API Connected")
+            st.success("Service connecté")
         else:
-            st.warning("API key required")
+            st.error("Service non disponible")
 
         st.markdown("---")
 
@@ -203,7 +211,7 @@ def main():
             st.rerun()
 
     if not client:
-        st.info("👈 Enter your OpenAI API key in the sidebar")
+        st.error("Le service de traduction n'est pas disponible. Contactez l'administrateur.")
         return
 
     # File upload - compact
@@ -322,6 +330,7 @@ def main():
     if st.button("🚀 Start Translation", type="primary", use_container_width=True):
         # Clear any previous translations
         st.session_state.translated_files = {}
+        st.session_state.translations_data = {}
 
         for file_name, config in file_configs.items():
             file = config["file"]
@@ -362,12 +371,18 @@ def main():
                     )
 
                 try:
+                    # Get existing content from target sheet to skip already-filled cells
+                    file.seek(0)
+                    existing_content = get_existing_content(file, target_sheet, content_column)
+                    file.seek(0)
+
                     translated = translate_content_list(
                         content_list,
                         target_sheet,
                         client,
                         model=model,
-                        progress_callback=update_progress
+                        progress_callback=update_progress,
+                        existing_content=existing_content
                     )
                     translations[target_sheet] = translated
 
@@ -380,7 +395,7 @@ def main():
             progress_bar.progress(1.0)
             status_text.caption(f"✅ {file_name} complete!")
 
-            # Create translated workbook and make it available for download immediately
+            # Create translated workbook and store as bytes (not BytesIO) for better session state handling
             if translations:
                 file.seek(0)
                 output_buffer = create_translated_workbook(
@@ -389,7 +404,9 @@ def main():
                     content_column,
                     translations
                 )
-                st.session_state.translated_files[file_name] = output_buffer
+                # Store as bytes to avoid BytesIO serialization issues with many files
+                output_buffer.seek(0)
+                st.session_state.translated_files[file_name] = output_buffer.read()
 
                 # Store translations data for preview
                 st.session_state.translations_data[file_name] = {
@@ -399,37 +416,9 @@ def main():
                     "content_column": content_column,
                 }
 
-                # Show download button immediately for this file
-                base_name = file_name.rsplit(".", 1)[0]
-                download_name = f"{base_name}_translated.xlsx"
-                output_buffer.seek(0)
-
-                with download_section:
-                    st.download_button(
-                        label=f"📥 Download {base_name}",
-                        data=output_buffer,
-                        file_name=download_name,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key=f"download_immediate_{file_name}",
-                    )
-
         st.session_state.translation_complete = True
         st.balloons()
-
-        # Show ZIP option if multiple files
-        if len(st.session_state.translated_files) > 1:
-            with download_section:
-                zip_buffer = create_multi_file_zip({
-                    f"{name.rsplit('.', 1)[0]}_translated.xlsx": buf
-                    for name, buf in st.session_state.translated_files.items()
-                })
-                st.download_button(
-                    label="📦 Download All (ZIP)",
-                    data=zip_buffer,
-                    file_name="translations.zip",
-                    mime="application/zip",
-                    key="download_zip_final"
-                )
+        st.rerun()  # Rerun to show download section properly
 
     # Show existing downloads if translation was completed in a previous run
     elif st.session_state.translation_complete and st.session_state.translated_files:
@@ -437,23 +426,21 @@ def main():
             st.markdown("---")
             st.markdown("#### 4. Download")
 
-            for file_name, buffer in st.session_state.translated_files.items():
-                base_name = file_name.rsplit(".", 1)[0]
-                download_name = f"{base_name}_translated.xlsx"
-
-                buffer.seek(0)
+            for file_name, file_bytes in st.session_state.translated_files.items():
+                # Keep original filename (no "_translated" suffix)
                 st.download_button(
-                    label=f"📥 Download {base_name}",
-                    data=buffer,
-                    file_name=download_name,
+                    label=f"📥 {file_name}",
+                    data=file_bytes,
+                    file_name=file_name,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key=f"download_{file_name}",
                 )
 
             if len(st.session_state.translated_files) > 1:
+                # Create ZIP with original filenames
                 zip_buffer = create_multi_file_zip({
-                    f"{name.rsplit('.', 1)[0]}_translated.xlsx": buf
-                    for name, buf in st.session_state.translated_files.items()
+                    name: BytesIO(file_bytes)
+                    for name, file_bytes in st.session_state.translated_files.items()
                 })
                 st.download_button(
                     label="📦 Download All (ZIP)",
