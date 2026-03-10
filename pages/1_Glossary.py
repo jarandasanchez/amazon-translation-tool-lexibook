@@ -24,6 +24,17 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+def get_admin_password():
+    """Get admin password from secrets or environment."""
+    try:
+        pw = st.secrets.get("GLOSSARY_PASSWORD")
+        if pw:
+            return str(pw)
+    except Exception:
+        pass
+    return os.getenv("GLOSSARY_PASSWORD", "lexibook2026")
+
+
 def load_glossary() -> list:
     """Load glossary from JSON file, or return defaults if no file exists."""
     if os.path.exists(GLOSSARY_FILE):
@@ -75,67 +86,92 @@ def main():
 
     st.markdown(f"**{len(df)} terms** across {len(LANGS)} languages")
 
-    # Editable table
-    st.markdown("#### Edit Glossary")
-    st.caption("Edit cells directly. Add rows with the + button at the bottom. Delete rows by selecting and pressing Delete.")
+    # Check admin access
+    is_admin = st.session_state.get("glossary_admin", False)
 
-    edited_df = st.data_editor(
-        df,
-        use_container_width=True,
-        height=min(800, 45 + len(df) * 35),
-        num_rows="dynamic",
-        column_config={
-            "term": st.column_config.TextColumn("Term", width="medium", help="Reference name (used as key)"),
-            "FR": st.column_config.TextColumn("FR", width="medium"),
-            "EN": st.column_config.TextColumn("EN", width="medium"),
-            "ES": st.column_config.TextColumn("ES", width="medium"),
-            "IT": st.column_config.TextColumn("IT", width="medium"),
-            "DE": st.column_config.TextColumn("DE", width="medium"),
-            "NL": st.column_config.TextColumn("NL", width="medium"),
-            "PL": st.column_config.TextColumn("PL", width="medium"),
-            "SE": st.column_config.TextColumn("SE", width="medium"),
-        },
-        key="glossary_editor",
-    )
-
-    # Action buttons
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-        if st.button("💾 Save", type="primary", use_container_width=True):
-            new_entries = df_to_glossary(edited_df)
-            save_glossary(new_entries)
-            st.success(f"Saved {len(new_entries)} terms")
-
-    with col2:
-        if st.button("🔄 Reset to defaults", use_container_width=True):
-            if os.path.exists(GLOSSARY_FILE):
-                os.remove(GLOSSARY_FILE)
-            st.rerun()
-
-    # Export as CSV
-    with col3:
-        csv_data = edited_df.to_csv(index=False).encode("utf-8-sig")
-        st.download_button(
-            "📥 Export CSV",
-            data=csv_data,
-            file_name="glossary.csv",
-            mime="text/csv",
+    if not is_admin:
+        # Read-only view
+        st.dataframe(
+            df,
             use_container_width=True,
+            height=min(800, 45 + len(df) * 35),
+            hide_index=True,
         )
 
-    # Import CSV
-    with col4:
-        csv_file = st.file_uploader("📤 Import CSV", type=["csv"], label_visibility="collapsed", key="csv_import")
-        if csv_file:
-            try:
-                imported = load_glossary_csv(csv_file.read())
-                save_glossary(imported)
-                st.success(f"Imported {len(imported)} terms")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Import error: {e}")
+        # Admin login
+        st.markdown("---")
+        with st.expander("Admin", expanded=False):
+            password = st.text_input("Password", type="password", key="admin_pw")
+            if st.button("Unlock", use_container_width=True):
+                if password == get_admin_password():
+                    st.session_state.glossary_admin = True
+                    st.rerun()
+                else:
+                    st.error("Wrong password")
+    else:
+        # Editable view
+        st.markdown("#### Edit Glossary")
+        st.caption("Edit cells directly. Add rows with the + button. Delete rows by selecting and pressing Delete.")
 
+        edited_df = st.data_editor(
+            df,
+            use_container_width=True,
+            height=min(800, 45 + len(df) * 35),
+            num_rows="dynamic",
+            column_config={
+                "term": st.column_config.TextColumn("Term", width="medium", help="Reference name (used as key)"),
+                "FR": st.column_config.TextColumn("FR", width="medium"),
+                "EN": st.column_config.TextColumn("EN", width="medium"),
+                "ES": st.column_config.TextColumn("ES", width="medium"),
+                "IT": st.column_config.TextColumn("IT", width="medium"),
+                "DE": st.column_config.TextColumn("DE", width="medium"),
+                "NL": st.column_config.TextColumn("NL", width="medium"),
+                "PL": st.column_config.TextColumn("PL", width="medium"),
+                "SE": st.column_config.TextColumn("SE", width="medium"),
+            },
+            key="glossary_editor",
+        )
+
+        # Action buttons
+        col1, col2, col3, col4, col5 = st.columns(5)
+
+        with col1:
+            if st.button("💾 Save", type="primary", use_container_width=True):
+                new_entries = df_to_glossary(edited_df)
+                save_glossary(new_entries)
+                st.success(f"Saved {len(new_entries)} terms")
+
+        with col2:
+            if st.button("🔄 Reset to defaults", use_container_width=True):
+                if os.path.exists(GLOSSARY_FILE):
+                    os.remove(GLOSSARY_FILE)
+                st.rerun()
+
+        with col3:
+            csv_data = edited_df.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                "📥 Export CSV",
+                data=csv_data,
+                file_name="glossary.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+        with col4:
+            csv_file = st.file_uploader("📤 Import CSV", type=["csv"], label_visibility="collapsed", key="csv_import")
+            if csv_file:
+                try:
+                    imported = load_glossary_csv(csv_file.read())
+                    save_glossary(imported)
+                    st.success(f"Imported {len(imported)} terms")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Import error: {e}")
+
+        with col5:
+            if st.button("🔒 Lock", use_container_width=True):
+                st.session_state.glossary_admin = False
+                st.rerun()
 
 
 if __name__ == "__main__":
