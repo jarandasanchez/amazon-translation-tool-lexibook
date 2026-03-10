@@ -1,13 +1,16 @@
+import logging
 import streamlit as st
 import pandas as pd
 from io import BytesIO
 import os
 from dotenv import load_dotenv
-from openai import OpenAI
+
+from google import genai
 
 from excel_handler import (
     get_workbook_info,
     read_source_sheet,
+    read_source_with_fallback,
     create_translated_workbook,
     create_multi_file_zip,
     get_existing_content,
@@ -15,8 +18,21 @@ from excel_handler import (
 from translator import (
     translate_content_list,
     estimate_cost,
-    LANGUAGE_NAMES
+    LANGUAGE_NAMES,
+    MODEL,
 )
+from glossary import get_active_glossary
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.FileHandler("translation.log", encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -137,28 +153,28 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-def get_openai_client():
-    """Get OpenAI client from secrets or environment (no user input)."""
+def get_gemini_client():
+    """Get Gemini client from secrets or environment."""
     api_key = None
     try:
-        api_key = st.secrets.get("OPENAI_API_KEY")
-    except:
+        api_key = st.secrets.get("GEMINI_API_KEY")
+    except Exception:
         pass
     if not api_key:
-        api_key = os.getenv("OPENAI_API_KEY")
+        api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return None
-    return OpenAI(api_key=api_key)
+    return genai.Client(api_key=api_key)
 
 
 def is_api_configured():
-    """Check if the API is configured (without exposing details to user)."""
+    """Check if the API is configured."""
     try:
-        if st.secrets.get("OPENAI_API_KEY"):
+        if st.secrets.get("GEMINI_API_KEY"):
             return True
-    except:
+    except Exception:
         pass
-    if os.getenv("OPENAI_API_KEY"):
+    if os.getenv("GEMINI_API_KEY"):
         return True
     return False
 
@@ -170,7 +186,7 @@ def initialize_session_state():
         "translation_complete": False,
         "file_configs": {},
         "translated_files": {},
-        "translations_data": {},  # Stores translation data for preview
+        "translations_data": {},
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -188,20 +204,19 @@ def main():
     with st.sidebar:
         st.markdown("#### Settings")
 
-        client = get_openai_client()
+        client = get_gemini_client()
         if client:
-            st.success("Service connecté")
+            st.success("Service connecte")
         else:
             st.error("Service non disponible")
 
         st.markdown("---")
 
-        model = st.selectbox(
-            "Model",
-            options=["gpt-4o-mini", "gpt-4o", "gpt-4-turbo"],
-            index=0,
-        )
-        st.caption("gpt-4o-mini: fastest & cheapest")
+        st.caption(f"Model: **{MODEL}**")
+
+        glossary = get_active_glossary()
+        st.caption(f"📖 {len(glossary)} glossary terms")
+        st.caption("Edit glossary in the **Glossary** page (sidebar)")
 
         st.markdown("---")
 
@@ -214,7 +229,7 @@ def main():
         st.error("Le service de traduction n'est pas disponible. Contactez l'administrateur.")
         return
 
-    # File upload - compact
+    # File upload
     st.markdown("#### 1. Upload Files")
 
     uploaded_files = st.file_uploader(
@@ -228,7 +243,7 @@ def main():
         st.caption("Upload Excel files with language sheets (FR, EN, ES, etc.)")
         return
 
-    # Analyze files - compact layout
+    # Analyze files
     st.markdown("#### 2. Configure")
 
     file_configs = {}
@@ -239,14 +254,12 @@ def main():
                 sheet_names, columns_per_sheet, rows_per_sheet = get_workbook_info(file)
                 file.seek(0)
 
-                # Compact file header
                 col_header, col_sheets = st.columns([1, 2])
                 with col_header:
                     st.markdown(f"**{file.name}**")
                 with col_sheets:
                     st.caption(f"Sheets: {', '.join(sheet_names)}")
 
-                # Compact selectors in 3 columns
                 col1, col2, col3 = st.columns(3)
 
                 with col1:
@@ -276,7 +289,38 @@ def main():
                         key=f"content_{file.name}"
                     )
 
-                # Scrollable preview - shows all rows
+                # Source fallback detection
+                fallback_sheet = None
+                fallback_used = []
+                has_fr = "FR" in sheet_names
+                has_en = "EN" in sheet_names
+
+                if source_sheet == "FR" and has_en:
+                    st.info("EN available as fallback for empty FR cells (auto-enabled)")
+                    fallback_sheet = "EN"
+
+                if source_sheet == "EN" and has_fr:
+                    add_fr = st.checkbox(
+                        "Also translate to FR?",
+                        value=False,
+                        key=f"add_fr_{file.name}",
+                    )
+                    if add_fr and "FR" not in target_sheets:
+                        target_sheets = target_sheets + ["FR"]
+
+                # Read content (with fallback if applicable)
+                if fallback_sheet:
+                    file.seek(0)
+                    content_list, fallback_used = read_source_with_fallback(
+                        file, source_sheet, fallback_sheet, content_column
+                    )
+                    file.seek(0)
+                    if fallback_used:
+                        st.caption(f"📋 {len(fallback_used)} cells sourced from {fallback_sheet} (FR was empty)")
+                else:
+                    content_list = source_df[content_column].tolist()
+
+                # Preview
                 with st.expander(f"Preview source ({len(source_df)} rows)", expanded=False):
                     st.dataframe(
                         source_df,
@@ -285,26 +329,26 @@ def main():
                         hide_index=False
                     )
 
-                content_list = source_df[content_column].tolist()
-
                 file_configs[file.name] = {
                     "file": file,
                     "source_sheet": source_sheet,
                     "target_sheets": target_sheets,
                     "content_column": content_column,
                     "content_list": content_list,
-                    "rows": len(content_list)
+                    "rows": len(content_list),
+                    "fallback_used": fallback_used,
                 }
 
             except Exception as e:
                 st.error(f"Error: {str(e)}")
+                logger.error(f"Error processing {file.name}: {e}")
 
         st.markdown("---")
 
     if not file_configs:
         return
 
-    # Summary and translate - compact
+    # Summary and translate
     st.markdown("#### 3. Translate")
 
     total_rows = sum(cfg["rows"] for cfg in file_configs.values())
@@ -315,7 +359,6 @@ def main():
         all_content.extend(cfg["content_list"])
     estimated_cost = estimate_cost(all_content, total_target_sheets)
 
-    # Compact summary in columns
     col1, col2, col3 = st.columns(3)
     col1.metric("Files", len(file_configs))
     col2.metric("Rows", total_rows)
@@ -323,12 +366,9 @@ def main():
 
     st.markdown("")
 
-    # Download section placeholder - shows completed files as they finish
     download_section = st.container()
 
-    # Translate button
     if st.button("🚀 Start Translation", type="primary", use_container_width=True):
-        # Clear any previous translations
         st.session_state.translated_files = {}
         st.session_state.translations_data = {}
 
@@ -342,16 +382,14 @@ def main():
             translations = {}
             total_languages = len(target_sheets)
 
-            # Compact progress UI
             progress_container = st.container()
             with progress_container:
-                # Language pills showing progress
                 lang_display = st.empty()
                 progress_bar = st.progress(0)
                 status_text = st.empty()
 
             for lang_idx, target_sheet in enumerate(target_sheets):
-                # Show language progress as pills
+                # Language progress pills
                 pills = []
                 for i, lang in enumerate(target_sheets):
                     if i < lang_idx:
@@ -362,40 +400,58 @@ def main():
                         pills.append(f"⏳ {lang}")
                 lang_display.markdown(" · ".join(pills))
 
-                def update_progress(current, total):
+                status_text.caption(
+                    f"Translating to {target_sheet}... ({lang_idx + 1}/{total_languages})"
+                )
+
+                def update_progress(current, total, _lang_idx=lang_idx):
                     lang_progress = current / total
-                    overall = (lang_idx + lang_progress) / total_languages
+                    overall = (_lang_idx + lang_progress) / total_languages
                     progress_bar.progress(overall)
                     status_text.caption(
-                        f"📝 {file_name} → {target_sheet} | Row {current}/{total} | {int(overall * 100)}%"
+                        f"📝 {file_name} → {target_sheet} | {int(overall * 100)}%"
                     )
 
                 try:
-                    # Get existing content from target sheet to skip already-filled cells
                     file.seek(0)
                     existing_content = get_existing_content(file, target_sheet, content_column)
                     file.seek(0)
 
                     translated = translate_content_list(
                         content_list,
+                        source_sheet,
                         target_sheet,
                         client,
-                        model=model,
                         progress_callback=update_progress,
-                        existing_content=existing_content
+                        existing_content=existing_content,
                     )
                     translations[target_sheet] = translated
 
+                    # Validate output
+                    source_non_empty = sum(
+                        1 for t in content_list
+                        if t and str(t).strip() and str(t).strip().lower() != "nan"
+                    )
+                    translated_non_empty = sum(1 for t in translated if t and str(t).strip())
+                    if source_non_empty > 0 and translated_non_empty / source_non_empty < 0.5:
+                        st.warning(
+                            f"⚠️ {target_sheet}: only {translated_non_empty}/{source_non_empty} "
+                            f"cells translated. Translation may have failed — try again."
+                        )
+                        logger.warning(
+                            f"{file_name} → {target_sheet}: {translated_non_empty}/{source_non_empty} cells"
+                        )
+
                 except Exception as e:
                     st.error(f"Failed {target_sheet}: {str(e)}")
+                    logger.error(f"Translation failed for {file_name} → {target_sheet}: {e}")
 
-            # Show completion
+            # Completion
             final_pills = [f"✅ {lang}" for lang in target_sheets]
             lang_display.markdown(" · ".join(final_pills))
             progress_bar.progress(1.0)
             status_text.caption(f"✅ {file_name} complete!")
 
-            # Create translated workbook and store as bytes (not BytesIO) for better session state handling
             if translations:
                 file.seek(0)
                 output_buffer = create_translated_workbook(
@@ -404,11 +460,9 @@ def main():
                     content_column,
                     translations
                 )
-                # Store as bytes to avoid BytesIO serialization issues with many files
                 output_buffer.seek(0)
                 st.session_state.translated_files[file_name] = output_buffer.read()
 
-                # Store translations data for preview
                 st.session_state.translations_data[file_name] = {
                     "source_sheet": source_sheet,
                     "source_content": content_list,
@@ -418,16 +472,15 @@ def main():
 
         st.session_state.translation_complete = True
         st.balloons()
-        st.rerun()  # Rerun to show download section properly
+        st.rerun()
 
-    # Show existing downloads if translation was completed in a previous run
+    # Download section
     elif st.session_state.translation_complete and st.session_state.translated_files:
         with download_section:
             st.markdown("---")
             st.markdown("#### 4. Download")
 
             for file_name, file_bytes in st.session_state.translated_files.items():
-                # Keep original filename (no "_translated" suffix)
                 st.download_button(
                     label=f"📥 {file_name}",
                     data=file_bytes,
@@ -437,7 +490,6 @@ def main():
                 )
 
             if len(st.session_state.translated_files) > 1:
-                # Create ZIP with original filenames
                 zip_buffer = create_multi_file_zip({
                     name: BytesIO(file_bytes)
                     for name, file_bytes in st.session_state.translated_files.items()
@@ -450,7 +502,7 @@ def main():
                     key="download_zip"
                 )
 
-    # Preview translated documents section
+    # Preview section
     if st.session_state.translation_complete and st.session_state.translations_data:
         st.markdown("---")
         st.markdown("#### 5. Preview Translations")
@@ -462,11 +514,9 @@ def main():
             source_sheet = data["source_sheet"]
 
             with st.expander(f"📄 {base_name} - Translations Preview", expanded=False):
-                # Create tabs for each language
                 all_langs = [source_sheet] + list(translations.keys())
                 tabs = st.tabs(all_langs)
 
-                # Source tab
                 with tabs[0]:
                     source_df = pd.DataFrame({
                         "Row": range(1, len(source_content) + 1),
@@ -474,7 +524,6 @@ def main():
                     })
                     st.dataframe(source_df, use_container_width=True, height=400, hide_index=True)
 
-                # Translation tabs
                 for i, (lang, translated_content) in enumerate(translations.items(), 1):
                     with tabs[i]:
                         compare_df = pd.DataFrame({

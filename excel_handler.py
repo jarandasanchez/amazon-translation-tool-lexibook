@@ -1,8 +1,10 @@
+import logging
 import pandas as pd
 from io import BytesIO
 from typing import Dict, List, Tuple, Optional
 import openpyxl
-from copy import copy
+
+logger = logging.getLogger(__name__)
 
 
 def get_existing_content(file, sheet_name: str, content_column: str) -> Dict[int, str]:
@@ -37,10 +39,57 @@ def get_existing_content(file, sheet_name: str, content_column: str) -> Dict[int
             if cell_value is not None and str(cell_value).strip() != "":
                 existing[row_idx - 2] = str(cell_value)  # 0-based index
 
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Error reading existing content from '{sheet_name}': {e}")
 
     return existing
+
+
+def read_source_with_fallback(
+    file,
+    primary_sheet: str,
+    fallback_sheet: str,
+    content_column: str,
+) -> Tuple[List[str], List[int]]:
+    """
+    Read content from primary sheet, fill empty cells from fallback sheet.
+
+    Returns:
+        (content_list, fallback_used_indices) — the merged content and which indices used fallback.
+    """
+    # Read primary sheet
+    primary_df = pd.read_excel(file, sheet_name=primary_sheet, engine="openpyxl")
+    file.seek(0)
+
+    if content_column not in primary_df.columns:
+        logger.warning(f"Column '{content_column}' not found in '{primary_sheet}'")
+        return list(primary_df.iloc[:, 1] if primary_df.shape[1] > 1 else primary_df.iloc[:, 0]), []
+
+    primary_content = primary_df[content_column].tolist()
+
+    # Try to read fallback sheet
+    fallback_used = []
+    try:
+        fallback_df = pd.read_excel(file, sheet_name=fallback_sheet, engine="openpyxl")
+        file.seek(0)
+
+        if content_column in fallback_df.columns:
+            fallback_content = fallback_df[content_column].tolist()
+
+            for i in range(len(primary_content)):
+                val = primary_content[i]
+                if val is None or str(val).strip() == "" or str(val).strip().lower() == "nan":
+                    if i < len(fallback_content):
+                        fb_val = fallback_content[i]
+                        if fb_val is not None and str(fb_val).strip() != "" and str(fb_val).strip().lower() != "nan":
+                            primary_content[i] = fb_val
+                            fallback_used.append(i)
+                            logger.info(f"Row {i}: used fallback from '{fallback_sheet}'")
+    except Exception as e:
+        logger.warning(f"Could not read fallback sheet '{fallback_sheet}': {e}")
+        file.seek(0)
+
+    return primary_content, fallback_used
 
 
 def get_workbook_info(file) -> Tuple[List[str], Dict[str, List[str]], Dict[str, int]]:
@@ -65,9 +114,7 @@ def get_workbook_info(file) -> Tuple[List[str], Dict[str, List[str]], Dict[str, 
 
 
 def read_source_sheet(file, sheet_name: str) -> pd.DataFrame:
-    """
-    Read the source sheet containing content to translate.
-    """
+    """Read the source sheet containing content to translate."""
     df = pd.read_excel(file, sheet_name=sheet_name, engine="openpyxl")
     file.seek(0)
     return df
@@ -81,22 +128,11 @@ def create_translated_workbook(
 ) -> BytesIO:
     """
     Create a new workbook with translations filled in, preserving original structure.
-
-    Args:
-        original_file: The original Excel file
-        source_sheet: Name of the source sheet (e.g., "FR")
-        content_column: Name of the column containing content to translate
-        translations: Dict mapping sheet name to list of translated content
-
-    Returns:
-        BytesIO buffer containing the new Excel file
     """
-    # Load the original workbook to preserve formatting
     original_file.seek(0)
     wb = openpyxl.load_workbook(original_file)
     original_file.seek(0)
 
-    # Get the source sheet to find column index
     source_ws = wb[source_sheet]
 
     # Find the content column index (1-based in openpyxl)
@@ -107,7 +143,6 @@ def create_translated_workbook(
             break
 
     if content_col_idx is None:
-        # Try to find by position (second column usually)
         content_col_idx = 2
 
     # Fill in translations for each target sheet
@@ -115,14 +150,11 @@ def create_translated_workbook(
         if sheet_name in wb.sheetnames and sheet_name != source_sheet:
             ws = wb[sheet_name]
 
-            # Update the column header to match source
             ws.cell(row=1, column=content_col_idx).value = content_column
 
-            # Fill in translated content (starting from row 2, skipping header)
             for row_idx, content in enumerate(translated_content, start=2):
                 ws.cell(row=row_idx, column=content_col_idx).value = content
 
-    # Save to buffer
     output = BytesIO()
     wb.save(output)
     output.seek(0)
@@ -131,9 +163,7 @@ def create_translated_workbook(
 
 
 def create_multi_file_zip(files: Dict[str, BytesIO]) -> BytesIO:
-    """
-    Create a ZIP file containing multiple Excel files.
-    """
+    """Create a ZIP file containing multiple Excel files."""
     import zipfile
 
     output = BytesIO()

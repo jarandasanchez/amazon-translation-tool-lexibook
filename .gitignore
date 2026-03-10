@@ -23,6 +23,12 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
+# Logs
+*.log
+
+# Glossary user data (editable via UI, not committed)
+glossary_data.json
+
 # Test files
 *.xlsx
 !requirements.txt
